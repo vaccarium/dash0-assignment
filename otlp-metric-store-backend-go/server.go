@@ -114,6 +114,15 @@ func run() (err error) {
 
 	startDiagnostics()
 
+	// Graceful shutdown on SIGTERM/SIGINT.
+	shutdownCh := make(chan os.Signal, 1)
+	signal.Notify(shutdownCh, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		sig := <-shutdownCh
+		fmt.Fprintf(os.Stderr, "[diagnostics] received %s, initiating graceful shutdown\n", sig.String())
+		grpcServer.GracefulStop()
+	}()
+
 	return grpcServer.Serve(listener)
 }
 
