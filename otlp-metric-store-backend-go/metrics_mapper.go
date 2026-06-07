@@ -2,12 +2,120 @@ package main
 
 import (
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
+	"github.com/cespare/xxhash/v2"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
 )
+
+// MetricBatch holds the result of mapping an ExportMetricsServiceRequest
+// into deduplicated metadata rows and thin data-point rows.
+type MetricBatch struct {
+	Metadata map[uint64]MetadataRow
+	Gauges   []ThinGaugeRow
+	Sums     []ThinSumRow
+}
+
+// canonicalMap serializes a map to a deterministic string: sorted keys,
+// "key=value" lines separated by newlines. Empty map returns "".
+func canonicalMap(m map[string]string) string {
+	if len(m) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	var b strings.Builder
+	for _, k := range keys {
+		b.WriteString(k)
+		b.WriteByte('=')
+		b.WriteString(m[k])
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+// metadataHashForGauge computes the xxHash-64 of all metadata fields for a gauge
+// data point, including a type discriminator to prevent cross-type collisions.
+func metadataHashForGauge(resource resourceFields, scope scopeFields, metric metricFields, attrs map[string]string) uint64 {
+	d := xxhash.New()
+	d.WriteString("gauge\n")
+	d.WriteString(scope.schemaURL)
+	d.WriteString(resource.schemaURL)
+	d.WriteString(canonicalMap(scope.attributes))
+	d.WriteString(fmt.Sprintf("%d\n", scope.droppedAttrCount))
+	d.WriteString(scope.name)
+	d.WriteString(scope.version)
+	d.WriteString(canonicalMap(resource.attributes))
+	d.WriteString(resource.serviceName)
+	d.WriteString(metric.name)
+	d.WriteString(metric.description)
+	d.WriteString(metric.unit)
+	d.WriteString(canonicalMap(attrs))
+	return d.Sum64()
+}
+
+// metadataHashForSum computes the xxHash-64 of all metadata fields for a sum
+// data point. Includes sum-specific fields (aggregation temporality, monotonicity)
+// so a sum and a gauge with otherwise identical fields produce different hashes.
+func metadataHashForSum(resource resourceFields, scope scopeFields, metric metricSumFields, attrs map[string]string) uint64 {
+	d := xxhash.New()
+	d.WriteString("sum\n")
+	d.WriteString(scope.schemaURL)
+	d.WriteString(resource.schemaURL)
+	d.WriteString(canonicalMap(scope.attributes))
+	d.WriteString(fmt.Sprintf("%d\n", scope.droppedAttrCount))
+	d.WriteString(scope.name)
+	d.WriteString(scope.version)
+	d.WriteString(canonicalMap(resource.attributes))
+	d.WriteString(resource.serviceName)
+	d.WriteString(metric.name)
+	d.WriteString(metric.description)
+	d.WriteString(metric.unit)
+	d.WriteString(canonicalMap(attrs))
+	d.WriteString(fmt.Sprintf("%d\n", metric.aggregationTemporality))
+	d.WriteString(fmt.Sprintf("%t\n", metric.isMonotonic))
+	return d.Sum64()
+}
+
+// resourceFields holds parsed resource-level metadata.
+type resourceFields struct {
+	attributes   map[string]string
+	schemaURL    string
+	serviceName  string
+}
+
+// scopeFields holds parsed scope-level metadata.
+type scopeFields struct {
+	name             string
+	version          string
+	attributes       map[string]string
+	droppedAttrCount uint32
+	schemaURL        string
+}
+
+// metricFields holds parsed metric-level metadata for a gauge.
+type metricFields struct {
+	name        string
+	description string
+	unit        string
+}
+
+// metricSumFields holds parsed metric-level metadata for a sum.
+type metricSumFields struct {
+	name                   string
+	description            string
+	unit                   string
+	aggregationTemporality int32
+	isMonotonic            bool
+}
 
 // serviceName extracts the service.name from resource attributes, returning "" if not found.
 func serviceName(resource *resourcepb.Resource) string {
@@ -67,94 +175,120 @@ func numberDataPointValue(dp *metricspb.NumberDataPoint) float64 {
 	}
 }
 
-// MapGaugeRows converts an ExportMetricsServiceRequest into GaugeRows
-// for all Gauge metrics found in the request.
-func MapGaugeRows(resourceMetrics []*metricspb.ResourceMetrics) []GaugeRow {
-	var rows []GaugeRow
+// MapToBatch converts a slice of ResourceMetrics into a MetricBatch containing
+// deduplicated metadata rows and thin data-point rows for all metric types.
+func MapToBatch(resourceMetrics []*metricspb.ResourceMetrics) *MetricBatch {
+	batch := &MetricBatch{
+		Metadata: make(map[uint64]MetadataRow),
+	}
+
 	for _, rm := range resourceMetrics {
-		svcName := serviceName(rm.GetResource())
-		resAttrs := kvToMap(rm.GetResource().GetAttributes())
-		resSchemaUrl := rm.GetSchemaUrl()
+		resource := resourceFields{
+			attributes:  kvToMap(rm.GetResource().GetAttributes()),
+			schemaURL:   rm.GetSchemaUrl(),
+			serviceName: serviceName(rm.GetResource()),
+		}
 
 		for _, sm := range rm.GetScopeMetrics() {
-			scope := sm.GetScope()
-			scopeAttrs := kvToMap(scope.GetAttributes())
+			rawScope := sm.GetScope()
+			scope := scopeFields{
+				name:             rawScope.GetName(),
+				version:          rawScope.GetVersion(),
+				attributes:       kvToMap(rawScope.GetAttributes()),
+				droppedAttrCount: rawScope.GetDroppedAttributesCount(),
+				schemaURL:        sm.GetSchemaUrl(),
+			}
 
 			for _, metric := range sm.GetMetrics() {
-				gauge := metric.GetGauge()
-				if gauge == nil {
-					continue
+				// --- Gauge ---
+				if gauge := metric.GetGauge(); gauge != nil {
+					mf := metricFields{
+						name:        metric.GetName(),
+						description: metric.GetDescription(),
+						unit:        metric.GetUnit(),
+					}
+					for _, dp := range gauge.GetDataPoints() {
+						attrs := kvToMap(dp.GetAttributes())
+						h := metadataHashForGauge(resource, scope, mf, attrs)
+
+						if _, exists := batch.Metadata[h]; !exists {
+							batch.Metadata[h] = MetadataRow{
+								Hash:                  h,
+								ResourceAttributes:    resource.attributes,
+								ResourceSchemaUrl:     resource.schemaURL,
+								ScopeName:             scope.name,
+								ScopeVersion:          scope.version,
+								ScopeAttributes:       scope.attributes,
+								ScopeDroppedAttrCount: scope.droppedAttrCount,
+								ScopeSchemaUrl:        scope.schemaURL,
+								ServiceName:           resource.serviceName,
+								MetricName:            mf.name,
+								MetricDescription:     mf.description,
+								MetricUnit:            mf.unit,
+								Attributes:            attrs,
+							}
+						}
+
+						batch.Gauges = append(batch.Gauges, ThinGaugeRow{
+							MetadataHash:  h,
+							StartTimeUnix: nanosToTime(dp.GetStartTimeUnixNano()),
+							TimeUnix:      nanosToTime(dp.GetTimeUnixNano()),
+							Value:         numberDataPointValue(dp),
+							Flags:         dp.GetFlags(),
+						})
+					}
 				}
-				for _, dp := range gauge.GetDataPoints() {
-					rows = append(rows, GaugeRow{
-						ResourceAttributes:    resAttrs,
-						ResourceSchemaUrl:     resSchemaUrl,
-						ScopeName:             scope.GetName(),
-						ScopeVersion:          scope.GetVersion(),
-						ScopeAttributes:       scopeAttrs,
-						ScopeDroppedAttrCount: scope.GetDroppedAttributesCount(),
-						ScopeSchemaUrl:        sm.GetSchemaUrl(),
-						ServiceName:           svcName,
-						MetricName:            metric.GetName(),
-						MetricDescription:     metric.GetDescription(),
-						MetricUnit:            metric.GetUnit(),
-						Attributes:            kvToMap(dp.GetAttributes()),
-						StartTimeUnix:         nanosToTime(dp.GetStartTimeUnixNano()),
-						TimeUnix:              nanosToTime(dp.GetTimeUnixNano()),
-						Value:                 numberDataPointValue(dp),
-						Flags:                 dp.GetFlags(),
-					})
+
+				// --- Sum ---
+				if sum := metric.GetSum(); sum != nil {
+					aggTemp := int32(sum.GetAggregationTemporality())
+					isMonotonic := sum.GetIsMonotonic()
+					mf := metricSumFields{
+						name:                   metric.GetName(),
+						description:            metric.GetDescription(),
+						unit:                   metric.GetUnit(),
+						aggregationTemporality: aggTemp,
+						isMonotonic:            isMonotonic,
+					}
+
+					for _, dp := range sum.GetDataPoints() {
+						attrs := kvToMap(dp.GetAttributes())
+						h := metadataHashForSum(resource, scope, mf, attrs)
+
+						if _, exists := batch.Metadata[h]; !exists {
+							aggTempCopy := aggTemp
+							isMonotonicCopy := isMonotonic
+							batch.Metadata[h] = MetadataRow{
+								Hash:                   h,
+								ResourceAttributes:     resource.attributes,
+								ResourceSchemaUrl:      resource.schemaURL,
+								ScopeName:              scope.name,
+								ScopeVersion:           scope.version,
+								ScopeAttributes:        scope.attributes,
+								ScopeDroppedAttrCount:  scope.droppedAttrCount,
+								ScopeSchemaUrl:         scope.schemaURL,
+								ServiceName:            resource.serviceName,
+								MetricName:             mf.name,
+								MetricDescription:      mf.description,
+								MetricUnit:             mf.unit,
+								Attributes:             attrs,
+								AggregationTemporality: &aggTempCopy,
+								IsMonotonic:            &isMonotonicCopy,
+							}
+						}
+
+						batch.Sums = append(batch.Sums, ThinSumRow{
+							MetadataHash:  h,
+							StartTimeUnix: nanosToTime(dp.GetStartTimeUnixNano()),
+							TimeUnix:      nanosToTime(dp.GetTimeUnixNano()),
+							Value:         numberDataPointValue(dp),
+							Flags:         dp.GetFlags(),
+						})
+					}
 				}
 			}
 		}
 	}
-	return rows
-}
 
-// MapSumRows converts an ExportMetricsServiceRequest into SumRows
-// for all Sum metrics found in the request.
-func MapSumRows(resourceMetrics []*metricspb.ResourceMetrics) []SumRow {
-	var rows []SumRow
-	for _, rm := range resourceMetrics {
-		svcName := serviceName(rm.GetResource())
-		resAttrs := kvToMap(rm.GetResource().GetAttributes())
-		resSchemaUrl := rm.GetSchemaUrl()
-
-		for _, sm := range rm.GetScopeMetrics() {
-			scope := sm.GetScope()
-			scopeAttrs := kvToMap(scope.GetAttributes())
-
-			for _, metric := range sm.GetMetrics() {
-				sum := metric.GetSum()
-				if sum == nil {
-					continue
-				}
-				for _, dp := range sum.GetDataPoints() {
-					rows = append(rows, SumRow{
-						GaugeRow: GaugeRow{
-							ResourceAttributes:    resAttrs,
-							ResourceSchemaUrl:     resSchemaUrl,
-							ScopeName:             scope.GetName(),
-							ScopeVersion:          scope.GetVersion(),
-							ScopeAttributes:       scopeAttrs,
-							ScopeDroppedAttrCount: scope.GetDroppedAttributesCount(),
-							ScopeSchemaUrl:        sm.GetSchemaUrl(),
-							ServiceName:           svcName,
-							MetricName:            metric.GetName(),
-							MetricDescription:     metric.GetDescription(),
-							MetricUnit:            metric.GetUnit(),
-							Attributes:            kvToMap(dp.GetAttributes()),
-							StartTimeUnix:         nanosToTime(dp.GetStartTimeUnixNano()),
-							TimeUnix:              nanosToTime(dp.GetTimeUnixNano()),
-							Value:                 numberDataPointValue(dp),
-							Flags:                 dp.GetFlags(),
-						},
-						AggregationTemporality: int32(sum.GetAggregationTemporality()),
-						IsMonotonic:            sum.GetIsMonotonic(),
-					})
-				}
-			}
-		}
-	}
-	return rows
+	return batch
 }

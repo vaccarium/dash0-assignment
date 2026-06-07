@@ -9,38 +9,50 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 )
 
-// GaugeRow represents a single gauge data point for ClickHouse insertion.
-type GaugeRow struct {
-	ResourceAttributes    map[string]string
-	ResourceSchemaUrl     string
-	ScopeName             string
-	ScopeVersion          string
-	ScopeAttributes       map[string]string
-	ScopeDroppedAttrCount uint32
-	ScopeSchemaUrl        string
-	ServiceName           string
-	MetricName            string
-	MetricDescription     string
-	MetricUnit            string
-	Attributes            map[string]string
-	StartTimeUnix         time.Time
-	TimeUnix              time.Time
-	Value                 float64
-	Flags                 uint32
+// MetadataRow represents a unique combination of metric metadata fields.
+// Hash is the xxHash-64 of the canonical serialization of all other fields.
+type MetadataRow struct {
+	Hash                   uint64
+	ResourceAttributes     map[string]string
+	ResourceSchemaUrl      string
+	ScopeName              string
+	ScopeVersion           string
+	ScopeAttributes        map[string]string
+	ScopeDroppedAttrCount  uint32
+	ScopeSchemaUrl         string
+	ServiceName            string
+	MetricName             string
+	MetricDescription      string
+	MetricUnit             string
+	Attributes             map[string]string
+	AggregationTemporality *int32 // nil for gauge; per-metric for sum/histogram
+	IsMonotonic            *bool  // nil for gauge; per-metric for sum
 }
 
-// SumRow represents a single sum data point for ClickHouse insertion.
-type SumRow struct {
-	GaugeRow
-	AggregationTemporality int32
-	IsMonotonic            bool
+// ThinGaugeRow represents a single gauge data point referencing its metadata by hash.
+type ThinGaugeRow struct {
+	MetadataHash  uint64
+	StartTimeUnix time.Time
+	TimeUnix      time.Time
+	Value         float64
+	Flags         uint32
+}
+
+// ThinSumRow represents a single sum data point referencing its metadata by hash.
+type ThinSumRow struct {
+	MetadataHash  uint64
+	StartTimeUnix time.Time
+	TimeUnix      time.Time
+	Value         float64
+	Flags         uint32
 }
 
 // MetricsStore defines the interface for storing metrics in ClickHouse.
 type MetricsStore interface {
 	CreateTables(ctx context.Context) error
-	InsertGauge(ctx context.Context, rows []GaugeRow) error
-	InsertSum(ctx context.Context, rows []SumRow) error
+	InsertMetadata(ctx context.Context, rows []MetadataRow) error
+	InsertGauge(ctx context.Context, rows []ThinGaugeRow) error
+	InsertSum(ctx context.Context, rows []ThinSumRow) error
 	Close() error
 }
 
@@ -73,9 +85,10 @@ func NewClickHouseMetricsStore(ctx context.Context, addr string, database string
 	return &ClickHouseMetricsStore{conn: conn}, nil
 }
 
-// CreateTables executes DDL for all 5 metric tables.
+// CreateTables executes DDL for the metadata table and all 5 metric value tables.
 func (s *ClickHouseMetricsStore) CreateTables(ctx context.Context) error {
 	ddls := []string{
+		createMetadataTableSQL,
 		createGaugeTableSQL,
 		createSumTableSQL,
 		createHistogramTableSQL,
@@ -90,14 +103,16 @@ func (s *ClickHouseMetricsStore) CreateTables(ctx context.Context) error {
 	return nil
 }
 
-// InsertGauge batch-inserts gauge rows into otel_metrics_gauge.
-func (s *ClickHouseMetricsStore) InsertGauge(ctx context.Context, rows []GaugeRow) error {
-	batch, err := s.conn.PrepareBatch(ctx, "INSERT INTO otel_metrics_gauge")
+// InsertMetadata batch-inserts metadata rows into metric_metadata.
+// Duplicate hashes are handled by ReplacingMergeTree asynchronous dedup.
+func (s *ClickHouseMetricsStore) InsertMetadata(ctx context.Context, rows []MetadataRow) error {
+	batch, err := s.conn.PrepareBatch(ctx, "INSERT INTO metric_metadata")
 	if err != nil {
-		return fmt.Errorf("preparing gauge batch: %w", err)
+		return fmt.Errorf("preparing metadata batch: %w", err)
 	}
 	for _, r := range rows {
 		if err := batch.Append(
+			r.Hash,
 			r.ResourceAttributes,
 			r.ResourceSchemaUrl,
 			r.ScopeName,
@@ -110,6 +125,24 @@ func (s *ClickHouseMetricsStore) InsertGauge(ctx context.Context, rows []GaugeRo
 			r.MetricDescription,
 			r.MetricUnit,
 			r.Attributes,
+			r.AggregationTemporality,
+			r.IsMonotonic,
+		); err != nil {
+			return fmt.Errorf("appending metadata row (hash=%d): %w", r.Hash, err)
+		}
+	}
+	return batch.Send()
+}
+
+// InsertGauge batch-inserts thin gauge rows into otel_metrics_gauge.
+func (s *ClickHouseMetricsStore) InsertGauge(ctx context.Context, rows []ThinGaugeRow) error {
+	batch, err := s.conn.PrepareBatch(ctx, "INSERT INTO otel_metrics_gauge")
+	if err != nil {
+		return fmt.Errorf("preparing gauge batch: %w", err)
+	}
+	for _, r := range rows {
+		if err := batch.Append(
+			r.MetadataHash,
 			r.StartTimeUnix,
 			r.TimeUnix,
 			r.Value,
@@ -121,32 +154,19 @@ func (s *ClickHouseMetricsStore) InsertGauge(ctx context.Context, rows []GaugeRo
 	return batch.Send()
 }
 
-// InsertSum batch-inserts sum rows into otel_metrics_sum.
-func (s *ClickHouseMetricsStore) InsertSum(ctx context.Context, rows []SumRow) error {
+// InsertSum batch-inserts thin sum rows into otel_metrics_sum.
+func (s *ClickHouseMetricsStore) InsertSum(ctx context.Context, rows []ThinSumRow) error {
 	batch, err := s.conn.PrepareBatch(ctx, "INSERT INTO otel_metrics_sum")
 	if err != nil {
 		return fmt.Errorf("preparing sum batch: %w", err)
 	}
 	for _, r := range rows {
 		if err := batch.Append(
-			r.ResourceAttributes,
-			r.ResourceSchemaUrl,
-			r.ScopeName,
-			r.ScopeVersion,
-			r.ScopeAttributes,
-			r.ScopeDroppedAttrCount,
-			r.ScopeSchemaUrl,
-			r.ServiceName,
-			r.MetricName,
-			r.MetricDescription,
-			r.MetricUnit,
-			r.Attributes,
+			r.MetadataHash,
 			r.StartTimeUnix,
 			r.TimeUnix,
 			r.Value,
 			r.Flags,
-			r.AggregationTemporality,
-			r.IsMonotonic,
 		); err != nil {
 			return fmt.Errorf("appending sum row: %w", err)
 		}
