@@ -20,6 +20,8 @@ import (
 	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/health"
+	"google.golang.org/grpc/health/grpc_health_v1"
 )
 
 var (
@@ -110,6 +112,10 @@ func run() (err error) {
 	)
 	colmetricspb.RegisterMetricsServiceServer(grpcServer, newServer(*listenAddr, nil))
 
+	healthServer := health.NewServer()
+	healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
+	grpc_health_v1.RegisterHealthServer(grpcServer, healthServer)
+
 	slog.Debug("Starting gRPC server")
 
 	startDiagnostics()
@@ -120,6 +126,7 @@ func run() (err error) {
 	go func() {
 		sig := <-shutdownCh
 		fmt.Fprintf(os.Stderr, "[diagnostics] received %s, initiating graceful shutdown\n", sig.String())
+		healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
 		grpcServer.GracefulStop()
 	}()
 
