@@ -87,9 +87,9 @@ func metadataHashForSum(resource resourceFields, scope scopeFields, metric metri
 
 // resourceFields holds parsed resource-level metadata.
 type resourceFields struct {
-	attributes   map[string]string
-	schemaURL    string
-	serviceName  string
+	attributes  map[string]string
+	schemaURL   string
+	serviceName string
 }
 
 // scopeFields holds parsed scope-level metadata.

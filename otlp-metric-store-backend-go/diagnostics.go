@@ -20,12 +20,12 @@ type diagnostics struct {
 	mapTotalNs atomic.Int64
 
 	// Insert calls per table: count and total wall-clock time.
-	metaInsertCount   atomic.Int64
-	metaInsertTotalNs atomic.Int64
-	gaugeInsertCount  atomic.Int64
+	metaInsertCount    atomic.Int64
+	metaInsertTotalNs  atomic.Int64
+	gaugeInsertCount   atomic.Int64
 	gaugeInsertTotalNs atomic.Int64
-	sumInsertCount    atomic.Int64
-	sumInsertTotalNs  atomic.Int64
+	sumInsertCount     atomic.Int64
+	sumInsertTotalNs   atomic.Int64
 }
 
 var diags diagnostics

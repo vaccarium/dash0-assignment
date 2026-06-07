@@ -35,12 +35,12 @@ var (
 const name = "dash0.com/otlp-log-processor-backend"
 
 var (
-	meter                  = otel.Meter(name)
-	logger                 = otelslog.NewLogger(name)
-	metricsReceivedCounter metric.Int64Counter
-	rowsInsertedCounter    metric.Int64Counter
-	insertErrorsCounter    metric.Int64Counter
-	insertLatencyHistogram metric.Float64Histogram
+	meter                    = otel.Meter(name)
+	logger                   = otelslog.NewLogger(name)
+	metricsReceivedCounter   metric.Int64Counter
+	rowsInsertedCounter      metric.Int64Counter
+	insertErrorsCounter      metric.Int64Counter
+	insertLatencyHistogram   metric.Float64Histogram
 	mappingDurationHistogram metric.Float64Histogram
 )
 
