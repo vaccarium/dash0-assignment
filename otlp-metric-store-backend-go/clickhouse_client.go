@@ -7,6 +7,8 @@ import (
 
 	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 )
 
 // MetadataRow represents a unique combination of metric metadata fields.
@@ -106,6 +108,13 @@ func (s *ClickHouseMetricsStore) CreateTables(ctx context.Context) error {
 // InsertMetadata batch-inserts metadata rows into metric_metadata.
 // Duplicate hashes are handled by ReplacingMergeTree asynchronous dedup.
 func (s *ClickHouseMetricsStore) InsertMetadata(ctx context.Context, rows []MetadataRow) error {
+	start := time.Now()
+	defer func() {
+		dur := time.Since(start)
+		insertLatencyHistogram.Record(ctx, dur.Seconds(), metric.WithAttributes(attribute.String("table", "metadata")))
+		diags.recordInsert("metadata", dur)
+	}()
+
 	batch, err := s.conn.PrepareBatch(ctx, "INSERT INTO metric_metadata")
 	if err != nil {
 		return fmt.Errorf("preparing metadata batch: %w", err)
@@ -136,6 +145,13 @@ func (s *ClickHouseMetricsStore) InsertMetadata(ctx context.Context, rows []Meta
 
 // InsertGauge batch-inserts thin gauge rows into otel_metrics_gauge.
 func (s *ClickHouseMetricsStore) InsertGauge(ctx context.Context, rows []ThinGaugeRow) error {
+	start := time.Now()
+	defer func() {
+		dur := time.Since(start)
+		insertLatencyHistogram.Record(ctx, dur.Seconds(), metric.WithAttributes(attribute.String("table", "gauge")))
+		diags.recordInsert("gauge", dur)
+	}()
+
 	batch, err := s.conn.PrepareBatch(ctx, "INSERT INTO otel_metrics_gauge")
 	if err != nil {
 		return fmt.Errorf("preparing gauge batch: %w", err)
@@ -156,6 +172,13 @@ func (s *ClickHouseMetricsStore) InsertGauge(ctx context.Context, rows []ThinGau
 
 // InsertSum batch-inserts thin sum rows into otel_metrics_sum.
 func (s *ClickHouseMetricsStore) InsertSum(ctx context.Context, rows []ThinSumRow) error {
+	start := time.Now()
+	defer func() {
+		dur := time.Since(start)
+		insertLatencyHistogram.Record(ctx, dur.Seconds(), metric.WithAttributes(attribute.String("table", "sum")))
+		diags.recordInsert("sum", dur)
+	}()
+
 	batch, err := s.conn.PrepareBatch(ctx, "INSERT INTO otel_metrics_sum")
 	if err != nil {
 		return fmt.Errorf("preparing sum batch: %w", err)
