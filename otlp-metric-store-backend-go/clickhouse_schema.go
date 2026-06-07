@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS metric_metadata (
     INDEX idx_attr_key mapKeys(Attributes) TYPE bloom_filter(0.01) GRANULARITY 1,
     INDEX idx_attr_value mapValues(Attributes) TYPE bloom_filter(0.01) GRANULARITY 1
 ) ENGINE = ReplacingMergeTree()
-ORDER BY (Hash)
+ORDER BY (ServiceName, MetricName, Hash)
 SETTINGS index_granularity = 8192;
 `
 

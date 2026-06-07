@@ -36,15 +36,18 @@ metadata table to see the human-readable fields.
 
 ## Design: ReplacingMergeTree for Metadata
 
-**Decision.** Use `ReplacingMergeTree` with `ORDER BY (Hash)` for the metadata table.
-Duplicate rows (same hash) are eliminated during merges.
+**Decision.** Use `ReplacingMergeTree` with `ORDER BY (ServiceName, MetricName, Hash)` for the
+metadata table. Duplicate rows (same ORDER BY key) are eliminated during merges.
 
 **Why.**
 - The hash is deterministic: every insert with a given metadata tuple produces the same hash and the
-  same column values. Duplicates are identical, so any merge policy is safe.
+  same column values. Since `Hash` depends on `ServiceName` and `MetricName`, two rows with the same
+  hash always have the same ORDER BY key — dedup works identically to a single-column key.
 - It avoids a SELECT-before-INSERT on the write path — just INSERT every metadata tuple alongside
   every batch of data points. The dedup happens asynchronously.
 - With `FINAL` (or `SELECT DISTINCT`), queries always see one row per hash.
+- Leading with `ServiceName` and `MetricName` aligns the primary index with the dominant Phase 1
+  query pattern: filtering by service and metric name uses the primary key instead of a full scan.
 
 ## Design: Value Tables ORDER BY (MetadataHash, TimeUnix)
 
