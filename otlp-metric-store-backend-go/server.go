@@ -22,12 +22,14 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/reflection"
 )
 
 var (
 	listenAddr            = flag.String("listenAddr", "localhost:4317", "The listen address")
 	maxReceiveMessageSize = flag.Int("maxReceiveMessageSize", 16777216, "The max message size in bytes the server can receive")
 	diagnosticInterval    = flag.Duration("diagnosticInterval", 0, "If >0, periodically log diagnostic counters at this interval")
+	enableReflection      = flag.Bool("enableReflection", true, "Enable gRPC server reflection (for grpcurl)")
 )
 
 const name = "dash0.com/otlp-log-processor-backend"
@@ -115,6 +117,9 @@ func run() (err error) {
 	healthServer := health.NewServer()
 	healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
 	grpc_health_v1.RegisterHealthServer(grpcServer, healthServer)
+	if *enableReflection {
+		reflection.Register(grpcServer)
+	}
 
 	slog.Debug("Starting gRPC server")
 
