@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"log"
 	"log/slog"
@@ -13,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/spf13/cobra"
 	"go.opentelemetry.io/contrib/bridges/otelslog"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/otel"
@@ -26,15 +26,45 @@ import (
 )
 
 var (
-	listenAddr            = flag.String("listenAddr", "localhost:4317", "The listen address")
-	maxReceiveMessageSize = flag.Int("maxReceiveMessageSize", 16777216, "The max message size in bytes the server can receive")
-	diagnosticInterval    = flag.Duration("diagnosticInterval", 0, "If >0, periodically log diagnostic counters at this interval")
-	enableReflection      = flag.Bool("enableReflection", true, "Enable gRPC server reflection (for grpcurl)")
-	clickhouseAddr        = flag.String("clickhouseAddr", "", "ClickHouse server address (host:port); if empty, metrics are not persisted")
-	clickhouseDatabase    = flag.String("clickhouseDatabase", "default", "ClickHouse database name")
-	clickhouseUsername    = flag.String("clickhouseUsername", "default", "ClickHouse username")
-	clickhousePassword    = flag.String("clickhousePassword", "", "ClickHouse password")
+	listenAddr            string
+	maxReceiveMessageSize int
+	diagnosticInterval    time.Duration
+	enableReflection      bool
+	clickhouseAddr        string
+	clickhouseDatabase    string
+	clickhouseUsername    string
+	clickhousePassword    string
+	configFile            string
 )
+
+var rootCmd = &cobra.Command{
+	Use:  "otlp-metric-store-backend",
+	Long: "OTLP metric store backend — receives OTLP metrics via gRPC and stores them in ClickHouse.",
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		if configFile == "" {
+			return nil
+		}
+		cfg, err := loadConfig(configFile)
+		if err != nil {
+			return err
+		}
+		applyConfig(cmd, cfg)
+		return nil
+	},
+	RunE: run,
+}
+
+func init() {
+	rootCmd.Flags().StringVar(&listenAddr, "listenAddr", "localhost:4317", "The listen address")
+	rootCmd.Flags().IntVar(&maxReceiveMessageSize, "maxReceiveMessageSize", 16777216, "The max message size in bytes the server can receive")
+	rootCmd.Flags().DurationVar(&diagnosticInterval, "diagnosticInterval", 0, "If >0, periodically log diagnostic counters at this interval")
+	rootCmd.Flags().BoolVar(&enableReflection, "enableReflection", true, "Enable gRPC server reflection (for grpcurl)")
+	rootCmd.Flags().StringVar(&clickhouseAddr, "clickhouseAddr", "", "ClickHouse server address (host:port); if empty, metrics are not persisted")
+	rootCmd.Flags().StringVar(&clickhouseDatabase, "clickhouseDatabase", "default", "ClickHouse database name")
+	rootCmd.Flags().StringVar(&clickhouseUsername, "clickhouseUsername", "default", "ClickHouse username")
+	rootCmd.Flags().StringVar(&clickhousePassword, "clickhousePassword", "", "ClickHouse password")
+	rootCmd.Flags().StringVar(&configFile, "config", "", "Path to TOML config file")
+}
 
 const name = "dash0.com/otlp-log-processor-backend"
 
@@ -83,12 +113,12 @@ func init() {
 }
 
 func main() {
-	if err := run(); err != nil {
+	if err := rootCmd.Execute(); err != nil {
 		log.Fatalln(err)
 	}
 }
 
-func run() (err error) {
+func run(cmd *cobra.Command, args []string) (err error) {
 	slog.SetDefault(logger)
 	logger.Info("Starting application")
 
@@ -103,12 +133,10 @@ func run() (err error) {
 		err = errors.Join(err, otelShutdown(context.Background()))
 	}()
 
-	flag.Parse()
-
 	var store MetricsStore
-	if *clickhouseAddr != "" {
-		slog.Info("Connecting to ClickHouse", slog.String("addr", *clickhouseAddr))
-		chStore, err := NewClickHouseMetricsStore(context.Background(), *clickhouseAddr, *clickhouseDatabase, *clickhouseUsername, *clickhousePassword)
+	if clickhouseAddr != "" {
+		slog.Info("Connecting to ClickHouse", slog.String("addr", clickhouseAddr))
+		chStore, err := NewClickHouseMetricsStore(context.Background(), clickhouseAddr, clickhouseDatabase, clickhouseUsername, clickhousePassword)
 		if err != nil {
 			return err
 		}
@@ -122,23 +150,23 @@ func run() (err error) {
 		slog.Warn("No ClickHouse address configured; metrics will not be persisted")
 	}
 
-	slog.Debug("Starting listener", slog.String("listenAddr", *listenAddr))
-	listener, err := net.Listen("tcp", *listenAddr)
+	slog.Debug("Starting listener", slog.String("listenAddr", listenAddr))
+	listener, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		return err
 	}
 
 	grpcServer := grpc.NewServer(
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
-		grpc.MaxRecvMsgSize(*maxReceiveMessageSize),
+		grpc.MaxRecvMsgSize(maxReceiveMessageSize),
 		grpc.Creds(insecure.NewCredentials()),
 	)
-	colmetricspb.RegisterMetricsServiceServer(grpcServer, newServer(*listenAddr, store))
+	colmetricspb.RegisterMetricsServiceServer(grpcServer, newServer(listenAddr, store))
 
 	healthServer := health.NewServer()
 	healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
 	grpc_health_v1.RegisterHealthServer(grpcServer, healthServer)
-	if *enableReflection {
+	if enableReflection {
 		reflection.Register(grpcServer)
 	}
 
@@ -168,10 +196,10 @@ func startDiagnostics() {
 		}
 	}()
 
-	if *diagnosticInterval > 0 {
-		slog.Info("Periodic diagnostics enabled", slog.Duration("interval", *diagnosticInterval))
+	if diagnosticInterval > 0 {
+		slog.Info("Periodic diagnostics enabled", slog.Duration("interval", diagnosticInterval))
 		go func() {
-			ticker := time.NewTicker(*diagnosticInterval)
+			ticker := time.NewTicker(diagnosticInterval)
 			defer ticker.Stop()
 			for range ticker.C {
 				fmt.Fprintf(os.Stderr, "[diagnostics] %s\n", diags.dump())

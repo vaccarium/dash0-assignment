@@ -14,10 +14,10 @@ else
 fi
 
 # 2. Start the server (background, Ctrl+C to stop)
-go run . --listenAddr localhost:4317 --enableReflection --clickhouseAddr localhost:9000 --clickhousePassword test &
+go run . --config config.toml &
 SERVER_PID=$!
 trap "kill $SERVER_PID 2>/dev/null; exit" INT TERM
-sleep 1
+sleep 3
 echo "Server running on localhost:4317 (PID $SERVER_PID)"
 
 # 3. Example: list services

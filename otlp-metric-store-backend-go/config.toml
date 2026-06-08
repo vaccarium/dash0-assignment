@@ -1,0 +1,6 @@
+listen_addr = "localhost:4317"
+enable_reflection = true
+
+[clickhouse]
+addr = "localhost:9000"
+password = "test"
