@@ -23,6 +23,7 @@ echo "Server running on localhost:4317 (PID $SERVER_PID)"
 # 3. Example: list services
 echo
 echo "--- Services ---"
+set +e
 grpcurl -plaintext localhost:4317 list
 
 # 4. Example: send a gauge metric
@@ -57,8 +58,9 @@ cat <<EOF | grpcurl -plaintext -d @ localhost:4317 \
   }]
 }
 EOF
+set -e
 
 echo
 echo "--- Send SIGUSR1 to see diagnostics: kill -SIGUSR1 $SERVER_PID ---"
 echo "--- Press Ctrl+C to stop ---"
-wait $SERVER_PID
+wait -f $SERVER_PID
