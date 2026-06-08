@@ -55,15 +55,38 @@ var rootCmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.Flags().StringVar(&listenAddr, "listenAddr", "localhost:4317", "The listen address")
-	rootCmd.Flags().IntVar(&maxReceiveMessageSize, "maxReceiveMessageSize", 16777216, "The max message size in bytes the server can receive")
-	rootCmd.Flags().DurationVar(&diagnosticInterval, "diagnosticInterval", 0, "If >0, periodically log diagnostic counters at this interval")
-	rootCmd.Flags().BoolVar(&enableReflection, "enableReflection", true, "Enable gRPC server reflection (for grpcurl)")
-	rootCmd.Flags().StringVar(&clickhouseAddr, "clickhouseAddr", "", "ClickHouse server address (host:port); if empty, metrics are not persisted")
-	rootCmd.Flags().StringVar(&clickhouseDatabase, "clickhouseDatabase", "default", "ClickHouse database name")
-	rootCmd.Flags().StringVar(&clickhouseUsername, "clickhouseUsername", "default", "ClickHouse username")
-	rootCmd.Flags().StringVar(&clickhousePassword, "clickhousePassword", "", "ClickHouse password")
-	rootCmd.Flags().StringVar(&configFile, "config", "", "Path to TOML config file")
+	rootCmd.PersistentFlags().StringVar(&listenAddr, "listenAddr", "localhost:4317", "The listen address")
+	rootCmd.PersistentFlags().IntVar(&maxReceiveMessageSize, "maxReceiveMessageSize", 16777216, "The max message size in bytes the server can receive")
+	rootCmd.PersistentFlags().DurationVar(&diagnosticInterval, "diagnosticInterval", 0, "If >0, periodically log diagnostic counters at this interval")
+	rootCmd.PersistentFlags().BoolVar(&enableReflection, "enableReflection", true, "Enable gRPC server reflection (for grpcurl)")
+	rootCmd.PersistentFlags().StringVar(&clickhouseAddr, "clickhouseAddr", "", "ClickHouse server address (host:port); if empty, metrics are not persisted")
+	rootCmd.PersistentFlags().StringVar(&clickhouseDatabase, "clickhouseDatabase", "default", "ClickHouse database name")
+	rootCmd.PersistentFlags().StringVar(&clickhouseUsername, "clickhouseUsername", "default", "ClickHouse username")
+	rootCmd.PersistentFlags().StringVar(&clickhousePassword, "clickhousePassword", "", "ClickHouse password")
+	rootCmd.PersistentFlags().StringVar(&configFile, "config", "", "Path to TOML config file")
+
+	rootCmd.AddCommand(migrateCmd)
+}
+
+var migrateCmd = &cobra.Command{
+	Use:   "migrate",
+	Short: "Create ClickHouse tables and exit",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if clickhouseAddr == "" {
+			return fmt.Errorf("--clickhouseAddr is required")
+		}
+		ctx := context.Background()
+		store, err := NewClickHouseMetricsStore(ctx, clickhouseAddr, clickhouseDatabase, clickhouseUsername, clickhousePassword)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		if err := store.CreateTables(ctx); err != nil {
+			return fmt.Errorf("creating tables: %w", err)
+		}
+		fmt.Println("Tables created successfully.")
+		return nil
+	},
 }
 
 const name = "dash0.com/otlp-log-processor-backend"
