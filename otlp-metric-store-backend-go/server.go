@@ -30,6 +30,10 @@ var (
 	maxReceiveMessageSize = flag.Int("maxReceiveMessageSize", 16777216, "The max message size in bytes the server can receive")
 	diagnosticInterval    = flag.Duration("diagnosticInterval", 0, "If >0, periodically log diagnostic counters at this interval")
 	enableReflection      = flag.Bool("enableReflection", true, "Enable gRPC server reflection (for grpcurl)")
+	clickhouseAddr        = flag.String("clickhouseAddr", "", "ClickHouse server address (host:port); if empty, metrics are not persisted")
+	clickhouseDatabase    = flag.String("clickhouseDatabase", "default", "ClickHouse database name")
+	clickhouseUsername    = flag.String("clickhouseUsername", "default", "ClickHouse username")
+	clickhousePassword    = flag.String("clickhousePassword", "", "ClickHouse password")
 )
 
 const name = "dash0.com/otlp-log-processor-backend"
@@ -101,6 +105,23 @@ func run() (err error) {
 
 	flag.Parse()
 
+	var store MetricsStore
+	if *clickhouseAddr != "" {
+		slog.Info("Connecting to ClickHouse", slog.String("addr", *clickhouseAddr))
+		chStore, err := NewClickHouseMetricsStore(context.Background(), *clickhouseAddr, *clickhouseDatabase, *clickhouseUsername, *clickhousePassword)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if cerr := chStore.Close(); cerr != nil {
+				err = errors.Join(err, cerr)
+			}
+		}()
+		store = chStore
+	} else {
+		slog.Warn("No ClickHouse address configured; metrics will not be persisted")
+	}
+
 	slog.Debug("Starting listener", slog.String("listenAddr", *listenAddr))
 	listener, err := net.Listen("tcp", *listenAddr)
 	if err != nil {
@@ -112,7 +133,7 @@ func run() (err error) {
 		grpc.MaxRecvMsgSize(*maxReceiveMessageSize),
 		grpc.Creds(insecure.NewCredentials()),
 	)
-	colmetricspb.RegisterMetricsServiceServer(grpcServer, newServer(*listenAddr, nil))
+	colmetricspb.RegisterMetricsServiceServer(grpcServer, newServer(*listenAddr, store))
 
 	healthServer := health.NewServer()
 	healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)

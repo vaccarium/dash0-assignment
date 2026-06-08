@@ -14,7 +14,7 @@ else
 fi
 
 # 2. Start the server (background, Ctrl+C to stop)
-go run . --listenAddr localhost:4317 --enableReflection &
+go run . --listenAddr localhost:4317 --enableReflection --clickhouseAddr localhost:9000 --clickhousePassword test &
 SERVER_PID=$!
 trap "kill $SERVER_PID 2>/dev/null; exit" INT TERM
 sleep 1
